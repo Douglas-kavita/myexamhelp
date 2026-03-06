@@ -1,4 +1,4 @@
-import ContactForm from "@/components/ContactForm";
+import ContactForm from "@/components/contactForm";
 
 export default function ContactPage() {
   const phone = process.env.NEXT_PUBLIC_WHATSAPP_NUMBER || "1234567890";
