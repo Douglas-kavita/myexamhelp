@@ -1,0 +1,81 @@
+@import "tailwindcss";
+@keyframes gradient-x {
+  0% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+
+.animate-gradient-x {
+  background-size: 200% 200%;
+  animation: gradient-x 6s ease infinite;
+}
+
+/* Theme variables */
+:root {
+  --bg: 11 15 23;
+  --text: 234 240 255;
+}
+/* Vertical looper animation (no styled-jsx; works in App Router) */
+.vertical-marquee {
+  animation: verticalScroll 22s linear infinite;
+}
+
+@keyframes verticalScroll {
+  0% {
+    transform: translateY(0);
+  }
+  100% {
+    transform: translateY(-50%);
+  }
+}
+
+
+/* Allow scrolling */
+html,
+body {
+  height: auto;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+/* Testimonials marquee animation */
+@keyframes marquee {
+  0% {
+    transform: translateX(0);
+  }
+  100% {
+    transform: translateX(-50%);
+  }
+}
+
+.animate-marquee {
+  animation: marquee 14s linear infinite;
+}
+@keyframes verticalScroll {
+  0% {
+    transform: translateY(0);
+  }
+  100% {
+    transform: translateY(-50%);
+  }
+}
+
+.animate-verticalScroll {
+  animation: verticalScroll 18s linear infinite;
+}
+@keyframes shine {
+  100% {
+    transform: translateX(120%) skewX(-12deg);
+  }
+}
+.vertical-marquee {
+  animation: verticalScroll 22s linear infinite;
+}
+
+@keyframes verticalScroll {
+  0% {
+    transform: translateY(0);
+  }
+  100% {
+    transform: translateY(-50%);
+  }
+}
