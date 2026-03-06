@@ -16,9 +16,9 @@ export default function sitemap() {
   }));
 
   const blogRoutes = getAllPostMeta().map((p) => ({
-    url: `${baseUrl}/blog/${p.slug}`,
-    lastModified: new Date(p.date),
-  }));
+  url: `${baseUrl}/blog/${p.slug}`,
+  lastModified: p.date ? new Date(p.date) : undefined,
+}));
 
   return [...staticRoutes, ...blogRoutes];
 }
