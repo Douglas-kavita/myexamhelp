@@ -28,7 +28,7 @@ export default function RootLayout({
         <Footer />
 
         {/* Chat widget loads globally */}
-        <ChatWidget publicKey={process.env.NEXT_PUBLIC_TIDIO_KEY!} />
+        <ChatWidget />
       </body>
     </html>
   );
