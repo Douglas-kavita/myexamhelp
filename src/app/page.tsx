@@ -3,9 +3,9 @@
 // src/app/page.tsx
 import Link from "next/link";
 import Image from "next/image";
-import ContactForm from "@/components/contactForm";
-
+import OpenChatButton from "@/components/OpenChatButton";
 import HelpBlogsSection from "@/components/HelpBlogsSection";
+
 
 function TrustImageCard({
   title,
