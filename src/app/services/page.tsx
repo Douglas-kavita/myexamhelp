@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import Image from "next/image";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 
 type TabKey = "certification" | "ged" | "teas" | "lsat" | "aws" | "proctored";
@@ -353,7 +353,7 @@ const MIDDLE_ACCENT_BY_TAB: Record<TabKey, string> = {
   proctored: "text-rose-950",
 };
 
-export default function ServicesPage() {
+function ServicesPageContent() {
   const sp = useSearchParams();
 
   const initialHeroTab: TabKey = isTabKey(sp.get("tab"))
@@ -1386,5 +1386,13 @@ function QuickPreview({
         </div>
       </div>
     </div>
+  );
+}
+
+export default function ServicesPage() {
+  return (
+    <Suspense fallback={<div>Loading...</div>}>
+      <ServicesPageContent />
+    </Suspense>
   );
 }
