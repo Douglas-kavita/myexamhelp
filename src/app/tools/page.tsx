@@ -1,9 +1,8 @@
 "use client";
 
-
 export const dynamic = "force-dynamic";
 
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 
@@ -161,7 +160,7 @@ function isToolKey(value: string | null): value is ToolKey {
   );
 }
 
-export default function FreeToolsPage() {
+function FreeToolsPageContent() {
   const router = useRouter();
   const sp = useSearchParams();
 
@@ -1495,5 +1494,13 @@ function RequestHelpModal({ onClose }: { onClose: () => void }) {
         </div>
       </div>
     </div>
+  );
+}
+
+export default function FreeToolsPage() {
+  return (
+    <Suspense fallback={<div>Loading...</div>}>
+      <FreeToolsPageContent />
+    </Suspense>
   );
 }
