@@ -1,4 +1,3 @@
-// src/app/layout.tsx
 import "./globals.css";
 import type { Metadata } from "next";
 import { headers } from "next/headers";
@@ -11,9 +10,6 @@ export const metadata: Metadata = {
   metadataBase: new URL("https://myexamhelp.com"),
   title: "MyExamHelp",
   description: "MyExamHelp — Services and Free Tools for students.",
-  other: {
-    "geo.region": "US",
-  },
 };
 
 export default function RootLayout({
@@ -21,7 +17,8 @@ export default function RootLayout({
 }: {
   children: React.ReactNode;
 }) {
-  const pathname = headers().get("x-pathname") || "";
+  const headerList = headers();
+  const pathname = headerList.get("x-pathname") || "";
 
   const isAdmin =
     pathname.startsWith("/admin") || pathname.startsWith("/reset-password");
