@@ -1,10 +1,5 @@
 import "./globals.css";
 import type { Metadata } from "next";
-import { headers } from "next/headers";
-
-import Navbar from "@/components/Navbar";
-import Footer from "@/components/Footer";
-import ChatWidget from "@/components/ChatWidget";
 
 export const metadata: Metadata = {
   metadataBase: new URL("https://myexamhelp.com"),
@@ -17,21 +12,10 @@ export default function RootLayout({
 }: {
   children: React.ReactNode;
 }) {
-  const headerList = headers();
-  const pathname = headerList.get("x-pathname") || "";
-
-  const isAdmin =
-    pathname.startsWith("/admin") || pathname.startsWith("/reset-password");
-
   return (
     <html lang="en">
       <body className="min-h-screen bg-white text-slate-900 antialiased">
-        {!isAdmin && <Navbar />}
-
         {children}
-
-        {!isAdmin && <Footer />}
-        {!isAdmin && <ChatWidget />}
       </body>
     </html>
   );

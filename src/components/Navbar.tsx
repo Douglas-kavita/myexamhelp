@@ -5,7 +5,6 @@ import { usePathname } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import OpenChatButton from "../components/OpenChatButton";
 
-
 type NavItem = { label: string; href: string };
 type NavGroup = { label: string; items: NavItem[] };
 
@@ -63,6 +62,15 @@ function normalize(path: string) {
 export default function Navbar() {
   const pathnameRaw = usePathname() || "/";
   const pathname = useMemo(() => normalize(pathnameRaw), [pathnameRaw]);
+
+  // ✅ Hide navbar on admin/auth pages only
+  if (
+    pathname.startsWith("/admin") ||
+    pathname.startsWith("/reset-password") ||
+    pathname.startsWith("/mehadmin")
+  ) {
+    return null;
+  }
 
   const [mobileOpen, setMobileOpen] = useState(false);
   const [openDropdown, setOpenDropdown] = useState<null | "services" | "tools" | "groupme">(null);
@@ -221,11 +229,10 @@ export default function Navbar() {
                 {it.label}
               </Link>
             ))}
-<OpenChatButton
-  className="ml-2 inline-flex items-center rounded-lg bg-orange-600 px-4 py-2 text-sm font-semibold text-white hover:bg-orange-700 transition"
->
-  Request Help
-</OpenChatButton>
+
+            <OpenChatButton className="ml-2 inline-flex items-center rounded-lg bg-orange-600 px-4 py-2 text-sm font-semibold text-white hover:bg-orange-700 transition">
+              Request Help
+            </OpenChatButton>
           </div>
 
           {/* Mobile button */}
