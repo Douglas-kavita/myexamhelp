@@ -49,12 +49,10 @@ export default function AdminPage() {
     } catch {}
   };
 
-  const [adminTyping, setAdminTyping] = useState(false);
   const typingOffTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   async function setTypingStatus(isTyping: boolean) {
     if (!activeId) return;
-    setAdminTyping(isTyping);
 
     await supabase.from("typing").upsert(
       {
@@ -100,9 +98,11 @@ export default function AdminPage() {
       return;
     }
 
-    setConversations((data as Conversation[]) ?? []);
-    if (!activeId && data?.[0]?.id) {
-      setActiveId(data[0].id);
+    const rows = (data as Conversation[]) ?? [];
+    setConversations(rows);
+
+    if (!activeId && rows[0]?.id) {
+      setActiveId(rows[0].id);
     }
   }
 
@@ -150,7 +150,11 @@ export default function AdminPage() {
         (payload) => {
           const newMsg = payload.new as Msg;
 
-          setMessages((prev) => [...prev, newMsg]);
+          setMessages((prev) => {
+            const exists = prev.some((m) => m.id === newMsg.id);
+            if (exists) return prev;
+            return [...prev, newMsg];
+          });
 
           if (newMsg.sender === "visitor") {
             playPop();
@@ -243,7 +247,7 @@ export default function AdminPage() {
 
   if (!sessionReady) {
     return (
-      <main className="min-h-screen grid place-items-center bg-slate-100">
+      <main className="fixed inset-0 z-[10000] grid place-items-center bg-slate-100">
         <div className="text-sm text-slate-500">Loading admin…</div>
       </main>
     );
@@ -251,7 +255,7 @@ export default function AdminPage() {
 
   if (!isAuthed) {
     return (
-      <main className="min-h-screen bg-slate-100">
+      <main className="fixed inset-0 z-[10000] overflow-y-auto bg-slate-100">
         <header className="border-b border-slate-200 bg-slate-950 text-white shadow-sm">
           <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-4">
             <div>
@@ -319,7 +323,7 @@ export default function AdminPage() {
   }
 
   return (
-    <main className="min-h-screen bg-slate-100">
+    <main className="fixed inset-0 z-[10000] overflow-y-auto bg-slate-100">
       <header className="sticky top-0 z-20 border-b border-slate-800 bg-slate-950 text-white shadow-md">
         <div className="mx-auto flex max-w-7xl items-center justify-between px-4 py-4">
           <div>
@@ -351,7 +355,7 @@ export default function AdminPage() {
               <div>
                 <div className="text-base font-bold text-slate-900">Client Inbox</div>
                 <div className="text-xs text-slate-500">
-                  Numbered conversations appear here
+                  One ticket per client conversation
                 </div>
               </div>
 
@@ -427,25 +431,23 @@ export default function AdminPage() {
                     <div
                       key={m.id}
                       className={`flex ${
-                        m.sender === "admin" ? "justify-end" : "justify-start"
+                        m.sender === "admin" ? "justify-start" : "justify-end"
                       }`}
                     >
                       <div className="max-w-[78%]">
                         <div
                           className={`rounded-3xl px-4 py-3 text-sm leading-6 shadow-sm whitespace-pre-wrap ${
                             m.sender === "admin"
-                              ? "rounded-br-md bg-slate-200 text-slate-900"
-                              : "rounded-bl-md bg-blue-900 text-white"
+                              ? "rounded-bl-md bg-slate-200 text-slate-900"
+                              : "rounded-br-md bg-blue-900 text-white"
                           }`}
                         >
                           {m.body}
                         </div>
 
                         <div
-                          className={`mt-1 px-1 text-[11px] ${
-                            m.sender === "admin"
-                              ? "text-right text-slate-400"
-                              : "text-left text-slate-400"
+                          className={`mt-1 px-1 text-[11px] text-slate-400 ${
+                            m.sender === "admin" ? "text-left" : "text-right"
                           }`}
                         >
                           {new Date(m.created_at).toLocaleTimeString([], {
