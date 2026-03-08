@@ -33,6 +33,7 @@ export default function AdminPage() {
   const [reply, setReply] = useState("");
   const [err, setErr] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
+  const [unreadIds, setUnreadIds] = useState<string[]>([]);
 
   const scrollerRef = useRef<HTMLDivElement | null>(null);
 
@@ -64,6 +65,104 @@ export default function AdminPage() {
     );
   }
 
+  function scrollToBottom(smooth = false) {
+    requestAnimationFrame(() => {
+      scrollerRef.current?.scrollTo({
+        top: scrollerRef.current.scrollHeight,
+        behavior: smooth ? "smooth" : "auto",
+      });
+    });
+  }
+
+  function markRead(conversationId: string) {
+    setUnreadIds((prev) => prev.filter((id) => id !== conversationId));
+  }
+
+  function markUnread(conversationId: string) {
+    setUnreadIds((prev) =>
+      prev.includes(conversationId) ? prev : [conversationId, ...prev]
+    );
+  }
+
+  async function loadConversations(preferredActiveId?: string | null) {
+    setErr(null);
+
+    const { data: conversationData, error: conversationError } = await supabase
+      .from("conversations")
+      .select("*")
+      .order("created_at", { ascending: false });
+
+    if (conversationError) {
+      setErr(conversationError.message);
+      return;
+    }
+
+    const rows = (conversationData as Conversation[]) ?? [];
+    setConversations(rows);
+
+    // Build unread marker from latest message per conversation:
+    // if latest message sender is visitor, show blue dot.
+    const { data: messageData, error: messageError } = await supabase
+      .from("messages")
+      .select("conversation_id, sender, created_at")
+      .order("created_at", { ascending: false });
+
+    if (!messageError && messageData) {
+      const latestByConversation = new Map<string, "visitor" | "admin">();
+
+      for (const row of messageData as Array<{
+        conversation_id: string;
+        sender: "visitor" | "admin";
+        created_at: string;
+      }>) {
+        if (!latestByConversation.has(row.conversation_id)) {
+          latestByConversation.set(row.conversation_id, row.sender);
+        }
+      }
+
+      const nextUnreadIds = rows
+        .filter((c) => latestByConversation.get(c.id) === "visitor")
+        .map((c) => c.id);
+
+      setUnreadIds(nextUnreadIds);
+    }
+
+    if (preferredActiveId) {
+      setActiveId(preferredActiveId);
+      return;
+    }
+
+    if (!activeId && rows[0]?.id) {
+      setActiveId(rows[0].id);
+    }
+  }
+
+  async function loadMessages(conversationId: string) {
+    setErr(null);
+
+    const { data, error } = await supabase
+      .from("messages")
+      .select("*")
+      .eq("conversation_id", conversationId)
+      .order("created_at", { ascending: true });
+
+    if (error) {
+      setErr(error.message);
+      return;
+    }
+
+    setMessages((data as Msg[]) ?? []);
+    scrollToBottom(false);
+  }
+
+  async function handleRefresh() {
+    await loadConversations(activeId);
+    if (activeId) {
+      await loadMessages(activeId);
+      markRead(activeId);
+    }
+  }
+
   useEffect(() => {
     (async () => {
       const { data } = await supabase.auth.getSession();
@@ -85,60 +184,18 @@ export default function AdminPage() {
     loadConversations();
   }, [isAuthed]);
 
-  async function loadConversations() {
-    setErr(null);
-
-    const { data, error } = await supabase
-      .from("conversations")
-      .select("*")
-      .order("created_at", { ascending: false });
-
-    if (error) {
-      setErr(error.message);
-      return;
-    }
-
-    const rows = (data as Conversation[]) ?? [];
-    setConversations(rows);
-
-    if (!activeId && rows[0]?.id) {
-      setActiveId(rows[0].id);
-    }
-  }
-
   useEffect(() => {
     if (!isAuthed || !activeId) return;
     loadMessages(activeId);
+    markRead(activeId);
   }, [isAuthed, activeId]);
 
-  async function loadMessages(conversationId: string) {
-    setErr(null);
-
-    const { data, error } = await supabase
-      .from("messages")
-      .select("*")
-      .eq("conversation_id", conversationId)
-      .order("created_at", { ascending: true });
-
-    if (error) {
-      setErr(error.message);
-      return;
-    }
-
-    setMessages((data as Msg[]) ?? []);
-
-    requestAnimationFrame(() => {
-      scrollerRef.current?.scrollTo({
-        top: scrollerRef.current.scrollHeight,
-      });
-    });
-  }
-
+  // realtime for currently open thread
   useEffect(() => {
     if (!isAuthed || !activeId) return;
 
-    const channel = supabase
-      .channel(`admin-messages:${activeId}`)
+    const activeChannel = supabase
+      .channel(`admin-active-messages:${activeId}`)
       .on(
         "postgres_changes",
         {
@@ -158,20 +215,63 @@ export default function AdminPage() {
 
           if (newMsg.sender === "visitor") {
             playPop();
+            markRead(activeId);
           }
 
-          requestAnimationFrame(() => {
-            scrollerRef.current?.scrollTo({
-              top: scrollerRef.current.scrollHeight,
-              behavior: "smooth",
-            });
-          });
+          scrollToBottom(true);
         }
       )
       .subscribe();
 
     return () => {
-      supabase.removeChannel(channel);
+      supabase.removeChannel(activeChannel);
+    };
+  }, [isAuthed, activeId, pop]);
+
+  // realtime for whole inbox
+  useEffect(() => {
+    if (!isAuthed) return;
+
+    const inboxChannel = supabase
+      .channel("admin-inbox-updates")
+      .on(
+        "postgres_changes",
+        {
+          event: "INSERT",
+          schema: "public",
+          table: "conversations",
+        },
+        async (payload) => {
+          const newConversation = payload.new as Conversation;
+          await loadConversations(newConversation.id);
+        }
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "INSERT",
+          schema: "public",
+          table: "messages",
+        },
+        async (payload) => {
+          const newMsg = payload.new as Msg;
+
+          await loadConversations(activeId);
+
+          if (newMsg.sender === "visitor" && newMsg.conversation_id !== activeId) {
+            markUnread(newMsg.conversation_id);
+            playPop();
+          }
+
+          if (newMsg.sender === "admin") {
+            setUnreadIds((prev) => prev.filter((id) => id !== newMsg.conversation_id));
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(inboxChannel);
     };
   }, [isAuthed, activeId, pop]);
 
@@ -215,6 +315,7 @@ export default function AdminPage() {
     setConversations([]);
     setMessages([]);
     setActiveId(null);
+    setUnreadIds([]);
   }
 
   async function sendReply() {
@@ -225,6 +326,7 @@ export default function AdminPage() {
 
     setReply("");
     void setTypingStatus(false);
+    markRead(activeId);
 
     const { error } = await supabase.from("messages").insert({
       conversation_id: activeId,
@@ -237,12 +339,7 @@ export default function AdminPage() {
       return;
     }
 
-    requestAnimationFrame(() => {
-      scrollerRef.current?.scrollTo({
-        top: scrollerRef.current?.scrollHeight ?? 0,
-        behavior: "smooth",
-      });
-    });
+    scrollToBottom(true);
   }
 
   if (!sessionReady) {
@@ -355,12 +452,12 @@ export default function AdminPage() {
               <div>
                 <div className="text-base font-bold text-slate-900">Client Inbox</div>
                 <div className="text-xs text-slate-500">
-                  One ticket per client conversation
+                  Blue dot = latest message from client
                 </div>
               </div>
 
               <button
-                onClick={loadConversations}
+                onClick={handleRefresh}
                 className="rounded-xl border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 transition hover:bg-slate-100"
               >
                 Refresh
@@ -371,40 +468,46 @@ export default function AdminPage() {
               {conversations.length === 0 ? (
                 <div className="p-4 text-sm text-slate-500">No conversations yet.</div>
               ) : (
-                conversations.map((c) => (
-                  <button
-                    key={c.id}
-                    onClick={() => setActiveId(c.id)}
-                    className={`w-full border-b border-slate-200 px-4 py-4 text-left transition ${
-                      activeId === c.id
-                        ? "bg-blue-50 ring-1 ring-inset ring-blue-100"
-                        : "bg-white hover:bg-slate-50"
-                    }`}
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="min-w-0">
-                        <div className="text-base font-bold text-slate-900">
-                          {c.ticket_no ? `MEH-${c.ticket_no}` : "MEH"} •{" "}
-                          {c.subject?.trim() ? c.subject : "No subject"}
+                conversations.map((c) => {
+                  const isUnread = unreadIds.includes(c.id);
+                  const isCurrent = activeId === c.id;
+
+                  return (
+                    <button
+                      key={c.id}
+                      onClick={() => {
+                        setActiveId(c.id);
+                        markRead(c.id);
+                      }}
+                      className={`w-full border-b border-slate-200 px-4 py-4 text-left transition ${
+                        isCurrent
+                          ? "bg-blue-50 ring-1 ring-inset ring-blue-100"
+                          : "bg-white hover:bg-slate-50"
+                      }`}
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="text-base font-bold text-slate-900">
+                            {c.ticket_no ? `MEH-${c.ticket_no}` : "MEH"} •{" "}
+                            {c.subject?.trim() ? c.subject : "No subject"}
+                          </div>
+
+                          <div className="mt-1 text-xs text-slate-500">
+                            {new Date(c.created_at).toLocaleString()}
+                          </div>
+
+                          <div className="mt-2 truncate text-[11px] text-slate-400">
+                            Client: {c.user_id}
+                          </div>
                         </div>
 
-                        <div className="mt-1 text-xs text-slate-500">
-                          {new Date(c.created_at).toLocaleString()}
-                        </div>
-
-                        <div className="mt-2 truncate text-[11px] text-slate-400">
-                          Client: {c.user_id}
-                        </div>
+                        {isUnread && !isCurrent ? (
+                          <div className="mt-1 h-2.5 w-2.5 flex-shrink-0 rounded-full bg-blue-600" />
+                        ) : null}
                       </div>
-
-                      <div
-                        className={`mt-1 h-2.5 w-2.5 flex-shrink-0 rounded-full ${
-                          activeId === c.id ? "bg-blue-600" : "bg-slate-300"
-                        }`}
-                      />
-                    </div>
-                  </button>
-                ))
+                    </button>
+                  );
+                })
               )}
             </div>
           </section>
