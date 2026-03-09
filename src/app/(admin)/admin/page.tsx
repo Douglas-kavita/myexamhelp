@@ -97,11 +97,20 @@ export default function AdminPage() {
       return;
     }
 
-    const rows = (conversationData as Conversation[]) ?? [];
+    const rawRows = (conversationData as Conversation[]) ?? [];
+
+    // Keep only the newest conversation per client so one client
+    // does not appear as many separate inbox entries.
+    const latestByUser = new Map<string, Conversation>();
+    for (const row of rawRows) {
+      if (!latestByUser.has(row.user_id)) {
+        latestByUser.set(row.user_id, row);
+      }
+    }
+
+    const rows = Array.from(latestByUser.values());
     setConversations(rows);
 
-    // Build unread marker from latest message per conversation:
-    // if latest message sender is visitor, show blue dot.
     const { data: messageData, error: messageError } = await supabase
       .from("messages")
       .select("conversation_id, sender, created_at")
@@ -190,7 +199,7 @@ export default function AdminPage() {
     markRead(activeId);
   }, [isAuthed, activeId]);
 
-  // realtime for currently open thread
+  // Realtime for currently open thread
   useEffect(() => {
     if (!isAuthed || !activeId) return;
 
@@ -221,14 +230,16 @@ export default function AdminPage() {
           scrollToBottom(true);
         }
       )
-      .subscribe();
+      .subscribe((status) => {
+        console.log("ADMIN realtime status:", status);
+      });
 
     return () => {
       supabase.removeChannel(activeChannel);
     };
-  }, [isAuthed, activeId, pop]);
+  }, [isAuthed, activeId]);
 
-  // realtime for whole inbox
+  // Realtime for whole inbox
   useEffect(() => {
     if (!isAuthed) return;
 
@@ -268,12 +279,14 @@ export default function AdminPage() {
           }
         }
       )
-      .subscribe();
+      .subscribe((status) => {
+        console.log("ADMIN inbox realtime status:", status);
+      });
 
     return () => {
       supabase.removeChannel(inboxChannel);
     };
-  }, [isAuthed, activeId, pop]);
+  }, [isAuthed, activeId]);
 
   async function signIn() {
     setErr(null);
@@ -324,22 +337,44 @@ export default function AdminPage() {
     const trimmed = reply.trim();
     if (!trimmed) return;
 
-    setReply("");
-    void setTypingStatus(false);
-    markRead(activeId);
+    const tempId = crypto.randomUUID();
 
-    const { error } = await supabase.from("messages").insert({
+    const tempMessage: Msg = {
+      id: tempId,
+      created_at: new Date().toISOString(),
       conversation_id: activeId,
       sender: "admin",
       body: trimmed,
-    });
+    };
+
+    // Show instantly on admin page
+    setMessages((prev) => [...prev, tempMessage]);
+    setReply("");
+    void setTypingStatus(false);
+    markRead(activeId);
+    scrollToBottom(true);
+
+    const { data, error } = await supabase
+      .from("messages")
+      .insert({
+        conversation_id: activeId,
+        sender: "admin",
+        body: trimmed,
+      })
+      .select("*")
+      .single();
 
     if (error) {
+      setMessages((prev) => prev.filter((m) => m.id !== tempId));
       setErr(error.message);
       return;
     }
 
-    scrollToBottom(true);
+    if (data) {
+      setMessages((prev) =>
+        prev.map((m) => (m.id === tempId ? (data as Msg) : m))
+      );
+    }
   }
 
   if (!sessionReady) {

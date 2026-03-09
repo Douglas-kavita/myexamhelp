@@ -12,6 +12,7 @@ type Msg = {
 
 export default function ChatWidget() {
   console.log("ChatWidget loaded");
+
   const [open, setOpen] = useState(false);
   const [text, setText] = useState("");
   const [conversationId, setConversationId] = useState<string | null>(null);
@@ -20,8 +21,8 @@ export default function ChatWidget() {
 
   const openedOnceRef = useRef(false);
   const popRef = useRef<HTMLAudioElement | null>(null);
+  const scrollerRef = useRef<HTMLDivElement | null>(null);
 
-  // sound
   useEffect(() => {
     const a = new Audio("/sounds/pop.mp3");
     a.preload = "auto";
@@ -46,7 +47,15 @@ export default function ChatWidget() {
     } catch {}
   }, []);
 
-  // open events
+  function scrollToBottom(smooth = false) {
+    requestAnimationFrame(() => {
+      scrollerRef.current?.scrollTo({
+        top: scrollerRef.current.scrollHeight,
+        behavior: smooth ? "smooth" : "auto",
+      });
+    });
+  }
+
   useEffect(() => {
     const openHandler = () => {
       setOpen(true);
@@ -66,7 +75,6 @@ export default function ChatWidget() {
     };
   }, [playPop]);
 
-  // create / reuse visitor
   useEffect(() => {
     (async () => {
       let visitorId = localStorage.getItem("meh_visitor_id");
@@ -83,13 +91,17 @@ export default function ChatWidget() {
         return;
       }
 
-      const { data: found } = await supabase
+      const { data: found, error: findError } = await supabase
         .from("conversations")
         .select("id")
         .eq("user_id", visitorId)
         .order("created_at", { ascending: false })
         .limit(1)
         .maybeSingle();
+
+      if (findError) {
+        console.error("Conversation lookup failed:", findError);
+      }
 
       if (found?.id) {
         localStorage.setItem("meh_conversation_id", found.id);
@@ -107,7 +119,7 @@ export default function ChatWidget() {
         .single();
 
       if (error) {
-        console.error(error);
+        console.error("Conversation creation failed:", error);
         return;
       }
 
@@ -118,57 +130,70 @@ export default function ChatWidget() {
     })();
   }, []);
 
-  // load messages + realtime
   useEffect(() => {
     if (!conversationId) return;
 
+    let isMounted = true;
+
     (async () => {
-      const { data } = await supabase
+      const { data, error } = await supabase
         .from("messages")
         .select("id, created_at, sender, body")
         .eq("conversation_id", conversationId)
         .order("created_at", { ascending: true });
 
-      setMessages((data as Msg[]) ?? []);
+      if (error) {
+        console.error("Loading messages failed:", error);
+        return;
+      }
+
+      if (isMounted) {
+        setMessages((data as Msg[]) ?? []);
+        scrollToBottom(false);
+      }
     })();
 
-  const channel = supabase
-  .channel(`messages-${conversationId}`)
-  .on(
-    "postgres_changes",
-    {
-      event: "INSERT",
-      schema: "public",
-      table: "messages",
-      filter: `conversation_id=eq.${conversationId}`,
-    },
-    (payload) => {
-      const newMsg = payload.new as Msg;
+    const channel = supabase
+      .channel(`messages:${conversationId}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "INSERT",
+          schema: "public",
+          table: "messages",
+          filter: `conversation_id=eq.${conversationId}`,
+        },
+        (payload) => {
+          const newMsg = payload.new as Msg;
 
-      setMessages((prev) => {
-        const exists = prev.some((m) => m.id === newMsg.id);
-        if (exists) return prev;
-        return [...prev, newMsg];
+          setMessages((prev) => {
+            const exists = prev.some((m) => m.id === newMsg.id);
+            if (exists) return prev;
+            return [...prev, newMsg];
+          });
+
+          if (newMsg.sender === "admin") {
+            playPop();
+          }
+
+          scrollToBottom(true);
+        }
+      )
+      .subscribe((status) => {
+        console.log("CLIENT realtime status:", status);
       });
 
-      if (newMsg.sender === "admin") playPop();
-    }
-  )
-  .subscribe((status) => {
-    console.log("Realtime status:", status);
-  });
+    return () => {
+      isMounted = false;
+      supabase.removeChannel(channel);
+    };
+  }, [conversationId, playPop]);
 
-return () => {
-  supabase.removeChannel(channel);
-};
-}, [conversationId, playPop]);
-
-  // typing indicator
   useEffect(() => {
     if (!conversationId) return;
 
     const channel = supabase
-      .channel(`typing-${conversationId}`)
+      .channel(`typing:${conversationId}`)
       .on(
         "postgres_changes",
         {
@@ -177,19 +202,35 @@ return () => {
           table: "typing",
           filter: `conversation_id=eq.${conversationId}`,
         },
-        (payload) => {
-          const row = payload.new as any;
-          setAdminIsTyping(!!row?.admin_typing);
+        async () => {
+          const { data } = await supabase
+            .from("typing")
+            .select("admin_typing")
+            .eq("conversation_id", conversationId)
+            .maybeSingle();
+
+          setAdminIsTyping(!!data?.admin_typing);
         }
       )
-      .subscribe();
+      .subscribe((status) => {
+        console.log("CLIENT typing realtime status:", status);
+      });
+
+    (async () => {
+      const { data } = await supabase
+        .from("typing")
+        .select("admin_typing")
+        .eq("conversation_id", conversationId)
+        .maybeSingle();
+
+      setAdminIsTyping(!!data?.admin_typing);
+    })();
 
     return () => {
       supabase.removeChannel(channel);
     };
   }, [conversationId]);
 
-  // auto open
   useEffect(() => {
     const t = setTimeout(() => {
       if (openedOnceRef.current) return;
@@ -201,12 +242,15 @@ return () => {
     return () => clearTimeout(t);
   }, [playPop]);
 
-  // send message
+  useEffect(() => {
+    if (!open) return;
+    scrollToBottom(false);
+  }, [open, messages]);
+
   async function sendVisitorMessage(body: string) {
     if (!conversationId || !body.trim()) return;
 
     const trimmed = body.trim();
-
     const tempId = crypto.randomUUID();
 
     const tempMessage: Msg = {
@@ -217,6 +261,7 @@ return () => {
     };
 
     setMessages((prev) => [...prev, tempMessage]);
+    scrollToBottom(true);
 
     const { data, error } = await supabase
       .from("messages")
@@ -229,7 +274,8 @@ return () => {
       .single();
 
     if (error) {
-      console.error(error);
+      console.error("Message insert failed:", error);
+      setMessages((prev) => prev.filter((m) => m.id !== tempId));
       return;
     }
 
@@ -237,6 +283,7 @@ return () => {
       setMessages((prev) =>
         prev.map((m) => (m.id === tempId ? (data as Msg) : m))
       );
+      scrollToBottom(true);
     }
   }
 
@@ -247,38 +294,42 @@ return () => {
 
   return (
     <>
-      {/* Floating Button */}
       <button
         onClick={() => {
           setOpen(true);
           playPop();
         }}
         className="fixed bottom-6 right-6 z-[9999] h-14 w-14 rounded-full bg-slate-900 text-white shadow-2xl"
+        aria-label="Open chat"
+        type="button"
       >
         💬
       </button>
 
       {open && (
-        <div className="fixed bottom-24 right-6 z-[9999] w-[360px] rounded-2xl border bg-white shadow-2xl overflow-hidden">
-          {/* Header */}
-          <div className="flex items-center justify-between px-4 py-3 bg-slate-900 text-white">
+        <div className="fixed bottom-24 right-6 z-[9999] w-[360px] overflow-hidden rounded-2xl border bg-white shadow-2xl">
+          <div className="flex items-center justify-between bg-slate-900 px-4 py-3 text-white">
             <div>
               <div className="text-sm font-semibold">MyExamHelp Chat</div>
               <div className="text-xs opacity-70">Online • replies fast</div>
             </div>
 
-            <button onClick={() => setOpen(false)}>✕</button>
+            <button onClick={() => setOpen(false)} type="button" aria-label="Close chat">
+              ✕
+            </button>
           </div>
 
-          {/* Messages */}
-          <div className="h-[340px] overflow-y-auto bg-slate-50 px-4 py-4 space-y-3">
-            <div className="bg-white border rounded-xl px-3 py-2 text-sm">
+          <div
+            ref={scrollerRef}
+            className="h-[340px] space-y-3 overflow-y-auto bg-slate-50 px-4 py-4"
+          >
+            <div className="rounded-xl border bg-white px-3 py-2 text-sm">
               Hi there 👋 <br />
               What exam or subject would you like help on?
             </div>
 
             {adminIsTyping && (
-              <div className="bg-white border rounded-xl px-3 py-2 text-sm text-slate-500">
+              <div className="rounded-xl border bg-white px-3 py-2 text-sm text-slate-500">
                 Admin is typing…
               </div>
             )}
@@ -294,12 +345,12 @@ return () => {
                   className={`max-w-[85%] rounded-2xl px-3 py-2 text-sm ${
                     m.sender === "visitor"
                       ? "bg-slate-900 text-white"
-                      : "bg-white border"
+                      : "border bg-white"
                   }`}
                 >
                   {m.body}
 
-                  <div className="text-[10px] opacity-60 mt-1">
+                  <div className="mt-1 text-[10px] opacity-60">
                     {new Date(m.created_at).toLocaleTimeString([], {
                       hour: "2-digit",
                       minute: "2-digit",
@@ -310,22 +361,24 @@ return () => {
             ))}
           </div>
 
-          {/* Input */}
-          <div className="border-t px-3 py-3 bg-white">
+          <div className="border-t bg-white px-3 py-3">
             <div className="flex gap-2">
               <input
                 value={text}
                 onChange={(e) => setText(e.target.value)}
                 placeholder="Enter your message..."
-                className="flex-1 border rounded-full px-4 py-2 text-sm"
+                className="flex-1 rounded-full border px-4 py-2 text-sm"
                 onKeyDown={(e) => {
-                  if (e.key === "Enter") submitChat();
+                  if (e.key === "Enter") {
+                    submitChat();
+                  }
                 }}
               />
 
               <button
                 onClick={submitChat}
-                className="bg-slate-900 text-white px-4 py-2 rounded-full text-sm"
+                className="rounded-full bg-slate-900 px-4 py-2 text-sm text-white"
+                type="button"
               >
                 Send
               </button>
