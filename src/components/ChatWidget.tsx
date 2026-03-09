@@ -11,6 +11,7 @@ type Msg = {
 };
 
 export default function ChatWidget() {
+  console.log("ChatWidget loaded");
   const [open, setOpen] = useState(false);
   const [text, setText] = useState("");
   const [conversationId, setConversationId] = useState<string | null>(null);
