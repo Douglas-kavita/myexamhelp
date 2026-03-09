@@ -20,6 +20,8 @@ type Msg = {
   body: string;
 };
 
+const ADMIN_EMAIL = "admin@myexamhelp.com"; // change if needed
+
 export default function AdminPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -28,390 +30,362 @@ export default function AdminPage() {
   const [isAuthed, setIsAuthed] = useState(false);
 
   const [conversations, setConversations] = useState<Conversation[]>([]);
-  const [activeId, setActiveId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Msg[]>([]);
+  const [activeId, setActiveId] = useState<string | null>(null);
   const [reply, setReply] = useState("");
-  const [err, setErr] = useState<string | null>(null);
-  const [info, setInfo] = useState<string | null>(null);
-  const [unreadIds, setUnreadIds] = useState<string[]>([]);
+  const [loadingConversations, setLoadingConversations] = useState(false);
+  const [loadingMessages, setLoadingMessages] = useState(false);
+  const [sending, setSending] = useState(false);
+  const [authError, setAuthError] = useState("");
+  const [pageError, setPageError] = useState("");
 
-  const scrollerRef = useRef<HTMLDivElement | null>(null);
+  const bottomRef = useRef<HTMLDivElement | null>(null);
 
-  const pop = useMemo(
-    () => (typeof Audio !== "undefined" ? new Audio("/sounds/pop.mp3") : null),
-    []
-  );
-
-  const playPop = () => {
+  // -----------------------------
+  // local unread tracking
+  // -----------------------------
+  const getReadMap = (): Record<string, string> => {
+    if (typeof window === "undefined") return {};
     try {
-      if (!pop) return;
-      pop.currentTime = 0;
-      void pop.play();
-    } catch {}
+      const raw = localStorage.getItem("admin-read-map");
+      return raw ? JSON.parse(raw) : {};
+    } catch {
+      return {};
+    }
   };
 
-  const typingOffTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const setConversationRead = (conversationId: string, isoTime: string) => {
+    if (typeof window === "undefined") return;
+    const map = getReadMap();
+    map[conversationId] = isoTime;
+    localStorage.setItem("admin-read-map", JSON.stringify(map));
+  };
 
-  async function setTypingStatus(isTyping: boolean) {
-    if (!activeId) return;
+  const getConversationReadTime = (conversationId: string) => {
+    const map = getReadMap();
+    return map[conversationId] || null;
+  };
 
-    await supabase.from("typing").upsert(
-      {
-        conversation_id: activeId,
-        admin_typing: isTyping,
-        updated_at: new Date().toISOString(),
-      },
-      { onConflict: "conversation_id" }
-    );
-  }
-
-  function scrollToBottom(smooth = false) {
-    requestAnimationFrame(() => {
-      scrollerRef.current?.scrollTo({
-        top: scrollerRef.current.scrollHeight,
-        behavior: smooth ? "smooth" : "auto",
-      });
-    });
-  }
-
-  function markRead(conversationId: string) {
-    setUnreadIds((prev) => prev.filter((id) => id !== conversationId));
-  }
-
-  function markUnread(conversationId: string) {
-    setUnreadIds((prev) =>
-      prev.includes(conversationId) ? prev : [conversationId, ...prev]
-    );
-  }
-
-  async function loadConversations(preferredActiveId?: string | null) {
-    setErr(null);
-
-    const { data: conversationData, error: conversationError } = await supabase
-      .from("conversations")
-      .select("*")
-      .order("created_at", { ascending: false });
-
-    if (conversationError) {
-      setErr(conversationError.message);
-      return;
-    }
-
-    const rows = (conversationData as Conversation[]) ?? [];
-    setConversations(rows);
-
-    // Build unread marker from latest message per conversation:
-    // if latest message sender is visitor, show blue dot.
-    const { data: messageData, error: messageError } = await supabase
-      .from("messages")
-      .select("conversation_id, sender, created_at")
-      .order("created_at", { ascending: false });
-
-    if (!messageError && messageData) {
-      const latestByConversation = new Map<string, "visitor" | "admin">();
-
-      for (const row of messageData as Array<{
-        conversation_id: string;
-        sender: "visitor" | "admin";
-        created_at: string;
-      }>) {
-        if (!latestByConversation.has(row.conversation_id)) {
-          latestByConversation.set(row.conversation_id, row.sender);
-        }
-      }
-
-      const nextUnreadIds = rows
-        .filter((c) => latestByConversation.get(c.id) === "visitor")
-        .map((c) => c.id);
-
-      setUnreadIds(nextUnreadIds);
-    }
-
-    if (preferredActiveId) {
-      setActiveId(preferredActiveId);
-      return;
-    }
-
-    if (!activeId && rows[0]?.id) {
-      setActiveId(rows[0].id);
-    }
-  }
-
-  async function loadMessages(conversationId: string) {
-    setErr(null);
-
-    const { data, error } = await supabase
-      .from("messages")
-      .select("*")
-      .eq("conversation_id", conversationId)
-      .order("created_at", { ascending: true });
-
-    if (error) {
-      setErr(error.message);
-      return;
-    }
-
-    setMessages((data as Msg[]) ?? []);
-    scrollToBottom(false);
-  }
-
-  async function handleRefresh() {
-    await loadConversations(activeId);
-    if (activeId) {
-      await loadMessages(activeId);
-      markRead(activeId);
-    }
-  }
-
+  // -----------------------------
+  // auth/session
+  // -----------------------------
   useEffect(() => {
-    (async () => {
-      const { data } = await supabase.auth.getSession();
-      setIsAuthed(!!data.session);
-      setSessionReady(true);
-    })();
+    let mounted = true;
 
-    const { data: sub } = supabase.auth.onAuthStateChange((_event, session) => {
+    const init = async () => {
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+
+      if (!mounted) return;
+
       setIsAuthed(!!session);
+      setSessionReady(true);
+    };
+
+    init();
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      setIsAuthed(!!session);
+      setSessionReady(true);
     });
 
     return () => {
-      sub.subscription.unsubscribe();
+      mounted = false;
+      subscription.unsubscribe();
     };
   }, []);
 
-  useEffect(() => {
-    if (!isAuthed) return;
-    loadConversations();
-  }, [isAuthed]);
+  const handleLogin = async () => {
+    setAuthError("");
 
-  useEffect(() => {
-    if (!isAuthed || !activeId) return;
-    loadMessages(activeId);
-    markRead(activeId);
-  }, [isAuthed, activeId]);
-
-  // realtime for currently open thread
-  useEffect(() => {
-    if (!isAuthed || !activeId) return;
-
-    const activeChannel = supabase
-      .channel(`admin-active-messages:${activeId}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "INSERT",
-          schema: "public",
-          table: "messages",
-          filter: `conversation_id=eq.${activeId}`,
-        },
-        (payload) => {
-          const newMsg = payload.new as Msg;
-
-          setMessages((prev) => {
-            const exists = prev.some((m) => m.id === newMsg.id);
-            if (exists) return prev;
-            return [...prev, newMsg];
-          });
-
-          if (newMsg.sender === "visitor") {
-            playPop();
-            markRead(activeId);
-          }
-
-          scrollToBottom(true);
-        }
-      )
-      .subscribe();
-
-    return () => {
-      supabase.removeChannel(activeChannel);
-    };
-  }, [isAuthed, activeId, pop]);
-
-  // realtime for whole inbox
-  useEffect(() => {
-    if (!isAuthed) return;
-
-    const inboxChannel = supabase
-      .channel("admin-inbox-updates")
-      .on(
-        "postgres_changes",
-        {
-          event: "INSERT",
-          schema: "public",
-          table: "conversations",
-        },
-        async (payload) => {
-          const newConversation = payload.new as Conversation;
-          await loadConversations(newConversation.id);
-        }
-      )
-      .on(
-        "postgres_changes",
-        {
-          event: "INSERT",
-          schema: "public",
-          table: "messages",
-        },
-        async (payload) => {
-          const newMsg = payload.new as Msg;
-
-          await loadConversations(activeId);
-
-          if (newMsg.sender === "visitor" && newMsg.conversation_id !== activeId) {
-            markUnread(newMsg.conversation_id);
-            playPop();
-          }
-
-          if (newMsg.sender === "admin") {
-            setUnreadIds((prev) => prev.filter((id) => id !== newMsg.conversation_id));
-          }
-        }
-      )
-      .subscribe();
-
-    return () => {
-      supabase.removeChannel(inboxChannel);
-    };
-  }, [isAuthed, activeId, pop]);
-
-  async function signIn() {
-    setErr(null);
-    setInfo(null);
+    if (!email || !password) {
+      setAuthError("Enter email and password.");
+      return;
+    }
 
     const { error } = await supabase.auth.signInWithPassword({
       email,
       password,
     });
 
-    if (error) setErr(error.message);
-  }
-
-  async function sendResetPassword() {
-    setErr(null);
-    setInfo(null);
-
-    const cleanEmail = email.trim();
-
-    if (!cleanEmail) {
-      setErr("Enter your email first, then click Forgot password.");
-      return;
-    }
-
-    const { error } = await supabase.auth.resetPasswordForEmail(cleanEmail, {
-      redirectTo: "https://myexamhelp-1gfx.vercel.app/reset-password",
-    });
-
     if (error) {
-      setErr(error.message);
+      setAuthError(error.message);
       return;
     }
+  };
 
-    setInfo("Password reset email sent. Open the newest email and use that link.");
-  }
-
-  async function signOut() {
+  const handleLogout = async () => {
     await supabase.auth.signOut();
     setConversations([]);
     setMessages([]);
     setActiveId(null);
-    setUnreadIds([]);
-  }
+  };
 
-  async function sendReply() {
+  // -----------------------------
+  // data loading
+  // -----------------------------
+  const loadConversations = async () => {
+    try {
+      setLoadingConversations(true);
+      setPageError("");
+
+      const { data, error } = await supabase
+        .from("conversations")
+        .select("id, created_at, user_id, subject, status, ticket_no")
+        .order("created_at", { ascending: false });
+
+      if (error) throw error;
+
+      setConversations((data || []) as Conversation[]);
+    } catch (err: any) {
+      setPageError(err.message || "Failed to load conversations.");
+    } finally {
+      setLoadingConversations(false);
+    }
+  };
+
+  const loadMessages = async (conversationId: string) => {
+    try {
+      setLoadingMessages(true);
+      setPageError("");
+
+      const { data, error } = await supabase
+        .from("messages")
+        .select("id, created_at, conversation_id, sender, body")
+        .eq("conversation_id", conversationId)
+        .order("created_at", { ascending: true });
+
+      if (error) throw error;
+
+      const rows = (data || []) as Msg[];
+      setMessages(rows);
+
+      // mark as read up to latest visitor message when opening thread
+      const lastVisitorMsg = [...rows]
+        .reverse()
+        .find((m) => m.sender === "visitor");
+
+      if (lastVisitorMsg) {
+        setConversationRead(conversationId, lastVisitorMsg.created_at);
+      } else {
+        setConversationRead(conversationId, new Date().toISOString());
+      }
+    } catch (err: any) {
+      setPageError(err.message || "Failed to load messages.");
+    } finally {
+      setLoadingMessages(false);
+    }
+  };
+
+  // first load after login
+  useEffect(() => {
+    if (!sessionReady || !isAuthed) return;
+    loadConversations();
+  }, [sessionReady, isAuthed]);
+
+  // open first conversation automatically
+  useEffect(() => {
+    if (!activeId && conversations.length > 0) {
+      setActiveId(conversations[0].id);
+    }
+  }, [conversations, activeId]);
+
+  // load messages when active conversation changes
+  useEffect(() => {
     if (!activeId) return;
+    loadMessages(activeId);
+  }, [activeId]);
 
-    const trimmed = reply.trim();
-    if (!trimmed) return;
+  // scroll messages down
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages]);
 
-    setReply("");
-    void setTypingStatus(false);
-    markRead(activeId);
+  // -----------------------------
+  // realtime refresh
+  // -----------------------------
+  useEffect(() => {
+    if (!isAuthed) return;
 
-    const { error } = await supabase.from("messages").insert({
-      conversation_id: activeId,
-      sender: "admin",
-      body: trimmed,
-    });
+    const channel = supabase
+      .channel("admin-realtime")
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "conversations" },
+        async () => {
+          await loadConversations();
+        }
+      )
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "messages" },
+        async (payload) => {
+          await loadConversations();
 
-    if (error) {
-      setErr(error.message);
+          const newRow = payload.new as Msg | undefined;
+          if (newRow?.conversation_id && newRow.conversation_id === activeId) {
+            await loadMessages(activeId);
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [isAuthed, activeId]);
+
+  // -----------------------------
+  // unread logic
+  // -----------------------------
+  const unreadMap = useMemo(() => {
+    const result: Record<string, boolean> = {};
+
+    for (const convo of conversations) {
+      result[convo.id] = false;
+    }
+
+    return result;
+  }, [conversations]);
+
+  const [messageCache, setMessageCache] = useState<Record<string, Msg[]>>({});
+
+  const refreshUnreadCache = async () => {
+    if (!conversations.length) {
+      setMessageCache({});
       return;
     }
 
-    scrollToBottom(true);
-  }
+    const ids = conversations.map((c) => c.id);
 
+    const { data, error } = await supabase
+      .from("messages")
+      .select("id, created_at, conversation_id, sender, body")
+      .in("conversation_id", ids)
+      .order("created_at", { ascending: true });
+
+    if (error) return;
+
+    const grouped: Record<string, Msg[]> = {};
+    for (const row of (data || []) as Msg[]) {
+      if (!grouped[row.conversation_id]) grouped[row.conversation_id] = [];
+      grouped[row.conversation_id].push(row);
+    }
+    setMessageCache(grouped);
+  };
+
+  useEffect(() => {
+    if (!isAuthed || conversations.length === 0) return;
+    refreshUnreadCache();
+  }, [isAuthed, conversations]);
+
+  const hasUnread = (conversationId: string) => {
+    const rows = messageCache[conversationId] || [];
+    const lastRead = getConversationReadTime(conversationId);
+
+    const unreadVisitor = rows.some((m) => {
+      if (m.sender !== "visitor") return false;
+      if (!lastRead) return true;
+      return new Date(m.created_at).getTime() > new Date(lastRead).getTime();
+    });
+
+    return unreadVisitor;
+  };
+
+  // when active messages change, sync cache for active thread
+  useEffect(() => {
+    if (!activeId) return;
+    setMessageCache((prev) => ({
+      ...prev,
+      [activeId]: messages,
+    }));
+  }, [messages, activeId]);
+
+  // -----------------------------
+  // send reply
+  // -----------------------------
+  const handleSend = async () => {
+    if (!activeId || !reply.trim()) return;
+
+    try {
+      setSending(true);
+      setPageError("");
+
+      const cleanReply = reply.trim();
+
+      const { error } = await supabase.from("messages").insert({
+        conversation_id: activeId,
+        sender: "admin",
+        body: cleanReply,
+      });
+
+      if (error) throw error;
+
+      setReply("");
+
+      await loadMessages(activeId);
+      await loadConversations();
+      await refreshUnreadCache();
+    } catch (err: any) {
+      setPageError(err.message || "Failed to send reply.");
+    } finally {
+      setSending(false);
+    }
+  };
+
+  const activeConversation = conversations.find((c) => c.id === activeId);
+
+  // -----------------------------
+  // UI
+  // -----------------------------
   if (!sessionReady) {
     return (
-      <main className="fixed inset-0 z-[10000] grid place-items-center bg-slate-100">
-        <div className="text-sm text-slate-500">Loading admin…</div>
+      <main className="min-h-screen bg-slate-100 flex items-center justify-center p-6">
+        <div className="bg-white rounded-2xl shadow p-6">Loading admin...</div>
       </main>
     );
   }
 
   if (!isAuthed) {
     return (
-      <main className="fixed inset-0 z-[10000] overflow-y-auto bg-slate-100">
-        <header className="border-b border-slate-200 bg-slate-950 text-white shadow-sm">
-          <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-4">
-            <div>
-              <div className="text-xl font-bold tracking-wide">MyExamHelp Admin</div>
-              <div className="text-xs text-slate-300">Secure inbox access</div>
-            </div>
-          </div>
-        </header>
+      <main className="min-h-screen bg-slate-100 flex items-center justify-center p-6">
+        <div className="w-full max-w-md rounded-2xl bg-white shadow-xl p-6">
+          <h1 className="text-2xl font-bold text-slate-900 mb-2">Admin Login</h1>
+          <p className="text-sm text-slate-600 mb-5">
+            Sign in with your Supabase admin account.
+          </p>
 
-        <div className="grid min-h-[calc(100vh-73px)] place-items-center px-4 py-10">
-          <div className="w-full max-w-md rounded-3xl border border-slate-200 bg-white p-6 shadow-[0_20px_60px_rgba(15,23,42,0.08)]">
-            <div className="text-2xl font-bold text-slate-900">Admin Login</div>
-            <div className="mt-1 text-sm text-slate-500">
-              Sign in to view and reply to chats.
-            </div>
-
+          <div className="space-y-4">
             <input
-              className="mt-5 w-full rounded-2xl border border-slate-300 bg-white px-4 py-3 text-sm outline-none transition focus:border-slate-400 focus:ring-4 focus:ring-slate-900/10"
-              placeholder="Email"
               type="email"
+              placeholder="Admin email"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
+              className="w-full rounded-xl border border-slate-300 px-4 py-3 outline-none focus:border-blue-500"
             />
 
             <input
-              className="mt-3 w-full rounded-2xl border border-slate-300 bg-white px-4 py-3 text-sm outline-none transition focus:border-slate-400 focus:ring-4 focus:ring-slate-900/10"
-              placeholder="Password"
               type="password"
+              placeholder="Password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") signIn();
-              }}
+              className="w-full rounded-xl border border-slate-300 px-4 py-3 outline-none focus:border-blue-500"
             />
 
-            {err && (
-              <div className="mt-3 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
-                {err}
+            {authError ? (
+              <div className="rounded-xl bg-red-50 text-red-700 px-4 py-3 text-sm">
+                {authError}
               </div>
-            )}
-
-            {info && (
-              <div className="mt-3 rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
-                {info}
-              </div>
-            )}
+            ) : null}
 
             <button
-              onClick={signIn}
-              className="mt-4 w-full rounded-2xl bg-slate-950 py-3 text-sm font-semibold text-white transition hover:bg-slate-800"
+              onClick={handleLogin}
+              className="w-full rounded-xl bg-blue-600 text-white py-3 font-medium hover:bg-blue-700"
             >
-              Sign in
-            </button>
-
-            <button
-              onClick={sendResetPassword}
-              className="mt-4 w-full text-sm font-medium text-slate-600 underline underline-offset-4 hover:text-slate-900"
-            >
-              Forgot password?
+              Log in
             </button>
           </div>
         </div>
@@ -420,200 +394,144 @@ export default function AdminPage() {
   }
 
   return (
-    <main className="fixed inset-0 z-[10000] overflow-y-auto bg-slate-100">
-      <header className="sticky top-0 z-20 border-b border-slate-800 bg-slate-950 text-white shadow-md">
-        <div className="mx-auto flex max-w-7xl items-center justify-between px-4 py-4">
-          <div>
-            <div className="text-xl font-bold tracking-wide">MyExamHelp Admin</div>
-            <div className="text-xs text-slate-300">
-              Conversations, replies, and live support inbox
+    <main className="min-h-screen bg-slate-100">
+      <div className="h-screen grid grid-cols-1 md:grid-cols-[340px_1fr]">
+        {/* Sidebar */}
+        <aside className="border-r border-slate-200 bg-white flex flex-col">
+          <div className="p-4 border-b border-slate-200 flex items-center justify-between gap-3">
+            <div>
+              <h1 className="text-xl font-bold text-slate-900">Admin Inbox</h1>
+              <p className="text-xs text-slate-500">{ADMIN_EMAIL}</p>
             </div>
+
+            <button
+              onClick={handleLogout}
+              className="rounded-lg border border-slate-300 px-3 py-2 text-sm hover:bg-slate-50"
+            >
+              Logout
+            </button>
           </div>
 
-          <button
-            onClick={signOut}
-            className="rounded-xl bg-white px-4 py-2 text-sm font-medium text-slate-900 transition hover:bg-slate-200"
-          >
-            Sign out
-          </button>
-        </div>
-      </header>
-
-      <div className="mx-auto max-w-7xl px-4 py-5">
-        {err && (
-          <div className="mb-4 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 shadow-sm">
-            {err}
+          <div className="p-3 border-b border-slate-200">
+            <button
+              onClick={async () => {
+                await loadConversations();
+                if (activeId) await loadMessages(activeId);
+                await refreshUnreadCache();
+              }}
+              className="w-full rounded-xl bg-slate-900 text-white py-2.5 text-sm font-medium hover:bg-slate-800"
+            >
+              Refresh
+            </button>
           </div>
-        )}
 
-        <div className="grid grid-cols-12 gap-5">
-          <section className="col-span-12 overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-[0_10px_40px_rgba(15,23,42,0.08)] md:col-span-4">
-            <div className="flex items-center justify-between border-b border-slate-200 px-4 py-4">
-              <div>
-                <div className="text-base font-bold text-slate-900">Client Inbox</div>
-                <div className="text-xs text-slate-500">
-                  Blue dot = latest message from client
+          <div className="flex-1 overflow-y-auto">
+            {loadingConversations ? (
+              <div className="p-4 text-sm text-slate-500">Loading conversations...</div>
+            ) : conversations.length === 0 ? (
+              <div className="p-4 text-sm text-slate-500">No conversations found.</div>
+            ) : (
+              conversations.map((convo) => {
+                const unread = hasUnread(convo.id);
+                const isActive = activeId === convo.id;
+
+                return (
+                  <button
+                    key={convo.id}
+                    onClick={() => setActiveId(convo.id)}
+                    className={`w-full text-left px-4 py-4 border-b border-slate-100 hover:bg-slate-50 ${
+                      isActive ? "bg-blue-50" : "bg-white"
+                    }`}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="font-semibold text-slate-900 truncate">
+                          {convo.subject || `Conversation #${convo.ticket_no ?? "—"}`}
+                        </div>
+                        <div className="text-xs text-slate-500 mt-1 truncate">
+                          {convo.user_id}
+                        </div>
+                      </div>
+
+                      {unread ? (
+                        <span className="mt-1 h-3 w-3 rounded-full bg-blue-600 shrink-0" />
+                      ) : null}
+                    </div>
+                  </button>
+                );
+              })
+            )}
+          </div>
+        </aside>
+
+        {/* Chat area */}
+        <section className="flex flex-col h-screen">
+          <div className="border-b border-slate-200 bg-white px-5 py-4">
+            <h2 className="text-lg font-bold text-slate-900">
+              {activeConversation?.subject ||
+                `Conversation #${activeConversation?.ticket_no ?? "—"}`}
+            </h2>
+            <p className="text-sm text-slate-500">
+              {activeConversation?.user_id || "Select a conversation"}
+            </p>
+          </div>
+
+          {pageError ? (
+            <div className="m-4 rounded-xl bg-red-50 text-red-700 px-4 py-3 text-sm">
+              {pageError}
+            </div>
+          ) : null}
+
+          <div className="flex-1 overflow-y-auto p-5 space-y-4">
+            {!activeId ? (
+              <div className="text-sm text-slate-500">Select a conversation.</div>
+            ) : loadingMessages ? (
+              <div className="text-sm text-slate-500">Loading messages...</div>
+            ) : messages.length === 0 ? (
+              <div className="text-sm text-slate-500">No messages yet.</div>
+            ) : (
+              messages.map((msg) => (
+                <div
+                  key={msg.id}
+                  className={`max-w-[80%] rounded-2xl px-4 py-3 text-sm shadow-sm ${
+                    msg.sender === "admin"
+                      ? "ml-auto bg-blue-600 text-white"
+                      : "bg-white text-slate-900"
+                  }`}
+                >
+                  <div className="whitespace-pre-wrap break-words">{msg.body}</div>
+                  <div
+                    className={`mt-2 text-[11px] ${
+                      msg.sender === "admin" ? "text-blue-100" : "text-slate-400"
+                    }`}
+                  >
+                    {new Date(msg.created_at).toLocaleString()}
+                  </div>
                 </div>
-              </div>
+              ))
+            )}
+            <div ref={bottomRef} />
+          </div>
 
+          <div className="border-t border-slate-200 bg-white p-4">
+            <div className="flex gap-3">
+              <textarea
+                value={reply}
+                onChange={(e) => setReply(e.target.value)}
+                placeholder="Type your reply..."
+                rows={3}
+                className="flex-1 resize-none rounded-2xl border border-slate-300 px-4 py-3 outline-none focus:border-blue-500"
+              />
               <button
-                onClick={handleRefresh}
-                className="rounded-xl border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 transition hover:bg-slate-100"
+                onClick={handleSend}
+                disabled={sending || !reply.trim() || !activeId}
+                className="self-end rounded-2xl bg-blue-600 text-white px-5 py-3 font-medium disabled:opacity-50"
               >
-                Refresh
+                {sending ? "Sending..." : "Send"}
               </button>
             </div>
-
-            <div className="max-h-[76vh] overflow-y-auto bg-slate-50/50">
-              {conversations.length === 0 ? (
-                <div className="p-4 text-sm text-slate-500">No conversations yet.</div>
-              ) : (
-                conversations.map((c) => {
-                  const isUnread = unreadIds.includes(c.id);
-                  const isCurrent = activeId === c.id;
-
-                  return (
-                    <button
-                      key={c.id}
-                      onClick={() => {
-                        setActiveId(c.id);
-                        markRead(c.id);
-                      }}
-                      className={`w-full border-b border-slate-200 px-4 py-4 text-left transition ${
-                        isCurrent
-                          ? "bg-blue-50 ring-1 ring-inset ring-blue-100"
-                          : "bg-white hover:bg-slate-50"
-                      }`}
-                    >
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="min-w-0">
-                          <div className="text-base font-bold text-slate-900">
-                            {c.ticket_no ? `MEH-${c.ticket_no}` : "MEH"} •{" "}
-                            {c.subject?.trim() ? c.subject : "No subject"}
-                          </div>
-
-                          <div className="mt-1 text-xs text-slate-500">
-                            {new Date(c.created_at).toLocaleString()}
-                          </div>
-
-                          <div className="mt-2 truncate text-[11px] text-slate-400">
-                            Client: {c.user_id}
-                          </div>
-                        </div>
-
-                        {isUnread && !isCurrent ? (
-                          <div className="mt-1 h-2.5 w-2.5 flex-shrink-0 rounded-full bg-blue-600" />
-                        ) : null}
-                      </div>
-                    </button>
-                  );
-                })
-              )}
-            </div>
-          </section>
-
-          <section className="col-span-12 flex min-h-[76vh] flex-col overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-[0_10px_40px_rgba(15,23,42,0.08)] md:col-span-8">
-            <div className="border-b border-slate-200 bg-white px-5 py-4">
-              <div className="text-lg font-bold text-slate-900">Messages</div>
-              <div className="mt-1 text-xs text-slate-500">
-                {activeId ? `Conversation: ${activeId}` : "Select a conversation"}
-              </div>
-            </div>
-
-            <div
-              ref={scrollerRef}
-              className="flex-1 space-y-4 overflow-y-auto bg-slate-50 px-5 py-5"
-            >
-              {activeId ? (
-                messages.length === 0 ? (
-                  <div className="rounded-2xl border border-dashed border-slate-300 bg-white px-4 py-6 text-sm text-slate-500">
-                    No messages yet.
-                  </div>
-                ) : (
-                  messages.map((m) => (
-                    <div
-                      key={m.id}
-                      className={`flex ${
-                        m.sender === "admin" ? "justify-start" : "justify-end"
-                      }`}
-                    >
-                      <div className="max-w-[78%]">
-                        <div
-                          className={`rounded-3xl px-4 py-3 text-sm leading-6 shadow-sm whitespace-pre-wrap ${
-                            m.sender === "admin"
-                              ? "rounded-bl-md bg-slate-200 text-slate-900"
-                              : "rounded-br-md bg-blue-900 text-white"
-                          }`}
-                        >
-                          {m.body}
-                        </div>
-
-                        <div
-                          className={`mt-1 px-1 text-[11px] text-slate-400 ${
-                            m.sender === "admin" ? "text-left" : "text-right"
-                          }`}
-                        >
-                          {new Date(m.created_at).toLocaleTimeString([], {
-                            hour: "2-digit",
-                            minute: "2-digit",
-                          })}
-                        </div>
-                      </div>
-                    </div>
-                  ))
-                )
-              ) : (
-                <div className="rounded-2xl border border-dashed border-slate-300 bg-white px-4 py-6 text-sm text-slate-500">
-                  Pick a client conversation from the left.
-                </div>
-              )}
-            </div>
-
-            {activeId && (
-              <div className="border-t border-slate-200 bg-white px-4 py-4">
-                <div className="flex items-end gap-3">
-                  <textarea
-                    value={reply}
-                    onChange={(e) => {
-                      const v = e.target.value;
-                      setReply(v);
-
-                      void setTypingStatus(v.trim().length > 0);
-
-                      if (typingOffTimer.current) {
-                        clearTimeout(typingOffTimer.current);
-                      }
-
-                      typingOffTimer.current = setTimeout(() => {
-                        void setTypingStatus(false);
-                      }, 1200);
-                    }}
-                    placeholder="Type your reply…"
-                    rows={3}
-                    className="flex-1 resize-none rounded-3xl border border-slate-300 bg-slate-50 px-4 py-3 text-sm outline-none transition focus:border-slate-400 focus:bg-white focus:ring-4 focus:ring-slate-900/10"
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
-                        e.preventDefault();
-                        sendReply();
-                      }
-                    }}
-                  />
-
-                  <button
-                    onClick={sendReply}
-                    className="rounded-2xl bg-slate-950 px-5 py-3 text-sm font-semibold text-white transition hover:bg-slate-800"
-                  >
-                    Send
-                  </button>
-                </div>
-
-                <div className="mt-2 text-[11px] text-slate-400">
-                  Enter = new line • Ctrl + Enter to send
-                </div>
-              </div>
-            )}
-          </section>
-        </div>
+          </div>
+        </section>
       </div>
     </main>
   );
