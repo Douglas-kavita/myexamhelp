@@ -131,34 +131,36 @@ export default function ChatWidget() {
       setMessages((data as Msg[]) ?? []);
     })();
 
-    const channel = supabase
-      .channel(`messages-${conversationId}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "INSERT",
-          schema: "public",
-          table: "messages",
-          filter: `conversation_id=eq.${conversationId}`,
-        },
-        (payload) => {
-          const newMsg = payload.new as Msg;
+  const channel = supabase
+  .channel(`messages-${conversationId}`)
+  .on(
+    "postgres_changes",
+    {
+      event: "INSERT",
+      schema: "public",
+      table: "messages",
+      filter: `conversation_id=eq.${conversationId}`,
+    },
+    (payload) => {
+      const newMsg = payload.new as Msg;
 
-          setMessages((prev) => {
-            const exists = prev.some((m) => m.id === newMsg.id);
-            if (exists) return prev;
-            return [...prev, newMsg];
-          });
+      setMessages((prev) => {
+        const exists = prev.some((m) => m.id === newMsg.id);
+        if (exists) return prev;
+        return [...prev, newMsg];
+      });
 
-          if (newMsg.sender === "admin") playPop();
-        }
-      )
-      .subscribe();
+      if (newMsg.sender === "admin") playPop();
+    }
+  )
+  .subscribe((status) => {
+    console.log("Realtime status:", status);
+  });
 
-    return () => {
-      supabase.removeChannel(channel);
-    };
-  }, [conversationId, playPop]);
+return () => {
+  supabase.removeChannel(channel);
+};
+}, [conversationId, playPop]);
 
   // typing indicator
   useEffect(() => {
