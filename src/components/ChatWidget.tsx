@@ -11,8 +11,6 @@ type Msg = {
 };
 
 export default function ChatWidget() {
-  console.log("ChatWidget loaded");
-
   const [open, setOpen] = useState(false);
   const [text, setText] = useState("");
   const [conversationId, setConversationId] = useState<string | null>(null);
@@ -22,6 +20,7 @@ export default function ChatWidget() {
   const openedOnceRef = useRef(false);
   const popRef = useRef<HTMLAudioElement | null>(null);
   const scrollerRef = useRef<HTMLDivElement | null>(null);
+  const initialLoadDoneRef = useRef(false);
 
   useEffect(() => {
     const a = new Audio("/sounds/pop.mp3");
@@ -130,106 +129,77 @@ export default function ChatWidget() {
     })();
   }, []);
 
-  useEffect(() => {
+  async function loadMessages(smoothScroll = false) {
     if (!conversationId) return;
 
-    let isMounted = true;
+    const { data, error } = await supabase
+      .from("messages")
+      .select("id, created_at, sender, body")
+      .eq("conversation_id", conversationId)
+      .order("created_at", { ascending: true });
 
-    (async () => {
-      const { data, error } = await supabase
-        .from("messages")
-        .select("id, created_at, sender, body")
-        .eq("conversation_id", conversationId)
-        .order("created_at", { ascending: true });
+    if (error) {
+      console.error("Loading messages failed:", error);
+      return;
+    }
 
-      if (error) {
-        console.error("Loading messages failed:", error);
-        return;
-      }
+    const nextMessages = (data as Msg[]) ?? [];
 
-      if (isMounted) {
-        setMessages((data as Msg[]) ?? []);
-        scrollToBottom(false);
-      }
-    })();
+    const prevIds = new Set(messages.map((m) => m.id));
+    const newlyArrivedAdmin = nextMessages.some(
+      (m) => !prevIds.has(m.id) && m.sender === "admin"
+    );
 
-    const channel = supabase
-      .channel(`messages:${conversationId}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "INSERT",
-          schema: "public",
-          table: "messages",
-          filter: `conversation_id=eq.${conversationId}`,
-        },
-        (payload) => {
-          const newMsg = payload.new as Msg;
+    const hasAnyChange =
+      nextMessages.length !== messages.length ||
+      nextMessages.some((m, i) => messages[i]?.id !== m.id);
 
-          setMessages((prev) => {
-            const exists = prev.some((m) => m.id === newMsg.id);
-            if (exists) return prev;
-            return [...prev, newMsg];
-          });
+    setMessages(nextMessages);
 
-          if (newMsg.sender === "admin") {
-            playPop();
-          }
+    if (hasAnyChange) {
+      scrollToBottom(smoothScroll);
+    }
 
-          scrollToBottom(true);
-        }
-      )
-      .subscribe((status) => {
-        console.log("CLIENT realtime status:", status);
-      });
+    if (initialLoadDoneRef.current && newlyArrivedAdmin) {
+      playPop();
+    }
+  }
 
-    return () => {
-      isMounted = false;
-      supabase.removeChannel(channel);
-    };
-  }, [conversationId, playPop]);
+  async function loadTypingStatus() {
+    if (!conversationId) return;
+
+    const { data } = await supabase
+      .from("typing")
+      .select("admin_typing")
+      .eq("conversation_id", conversationId)
+      .maybeSingle();
+
+    setAdminIsTyping(!!data?.admin_typing);
+  }
 
   useEffect(() => {
     if (!conversationId) return;
 
-    const channel = supabase
-      .channel(`typing:${conversationId}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "*",
-          schema: "public",
-          table: "typing",
-          filter: `conversation_id=eq.${conversationId}`,
-        },
-        async () => {
-          const { data } = await supabase
-            .from("typing")
-            .select("admin_typing")
-            .eq("conversation_id", conversationId)
-            .maybeSingle();
-
-          setAdminIsTyping(!!data?.admin_typing);
-        }
-      )
-      .subscribe((status) => {
-        console.log("CLIENT typing realtime status:", status);
-      });
-
     (async () => {
-      const { data } = await supabase
-        .from("typing")
-        .select("admin_typing")
-        .eq("conversation_id", conversationId)
-        .maybeSingle();
-
-      setAdminIsTyping(!!data?.admin_typing);
+      await loadMessages(false);
+      await loadTypingStatus();
+      initialLoadDoneRef.current = true;
     })();
-
-    return () => {
-      supabase.removeChannel(channel);
-    };
   }, [conversationId]);
+
+  // Poll messages + typing every 3 seconds
+  useEffect(() => {
+    if (!conversationId) return;
+
+    const poll = async () => {
+      await loadMessages(true);
+      await loadTypingStatus();
+    };
+
+    const interval = setInterval(poll, 3000);
+
+    return () => clearInterval(interval);
+  }, [conversationId, messages]);
 
   useEffect(() => {
     const t = setTimeout(() => {
