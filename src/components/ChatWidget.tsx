@@ -12,20 +12,16 @@ type Msg = {
 
 export default function ChatWidget() {
   const [open, setOpen] = useState(false);
-  const [step, setStep] = useState<"ask_subject" | "chat">("ask_subject");
-  const [subject, setSubject] = useState("");
   const [text, setText] = useState("");
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Msg[]>([]);
-  const openedOnceRef = useRef(false);
   const [adminIsTyping, setAdminIsTyping] = useState(false);
 
-  // ✅ POP SOUND (fixed + stable, no runtime overlay)
+  const openedOnceRef = useRef(false);
   const popRef = useRef<HTMLAudioElement | null>(null);
 
+  // sound
   useEffect(() => {
-    if (typeof window === "undefined") return;
-
     const a = new Audio("/sounds/pop.mp3");
     a.preload = "auto";
     a.volume = 0.6;
@@ -45,57 +41,60 @@ export default function ChatWidget() {
 
     try {
       a.currentTime = 0;
-      void a.play().catch(() => {
-        // autoplay blocked — ignore
-      });
-    } catch {
-      // ignore
-    }
+      void a.play().catch(() => {});
+    } catch {}
   }, []);
 
-  // ✅ STEP 1: global open/close events (so any button can open chat)
-  // (kept your original events + added myexamhelp:open-chat)
+  // open events
   useEffect(() => {
     const openHandler = () => {
-      console.log("✅ open-chat RECEIVED");
       setOpen(true);
       playPop();
-    };
-    const closeHandler = () => {
-      console.log("✅ close-chat RECEIVED");
-      setOpen(false);
     };
 
-    const openHandlerNew = () => {
-      console.log("✅ myexamhelp:open-chat RECEIVED");
-      setOpen(true);
-      playPop();
-    };
+    const closeHandler = () => setOpen(false);
 
     window.addEventListener("open-chat", openHandler);
     window.addEventListener("close-chat", closeHandler);
-    window.addEventListener("myexamhelp:open-chat", openHandlerNew);
+    window.addEventListener("myexamhelp:open-chat", openHandler);
 
     return () => {
       window.removeEventListener("open-chat", openHandler);
       window.removeEventListener("close-chat", closeHandler);
-      window.removeEventListener("myexamhelp:open-chat", openHandlerNew);
+      window.removeEventListener("myexamhelp:open-chat", openHandler);
     };
   }, [playPop]);
 
-  // 1️⃣ Create or reuse conversation (NO AUTH)
+  // create / reuse visitor
   useEffect(() => {
     (async () => {
-      const existing = localStorage.getItem("meh_conversation_id");
-      if (existing) {
-        setConversationId(existing);
+      let visitorId = localStorage.getItem("meh_visitor_id");
+
+      if (!visitorId) {
+        visitorId = crypto.randomUUID();
+        localStorage.setItem("meh_visitor_id", visitorId);
+      }
+
+      const existingConversation = localStorage.getItem("meh_conversation_id");
+
+      if (existingConversation) {
+        setConversationId(existingConversation);
         return;
       }
 
-      const visitorId =
-        localStorage.getItem("meh_visitor_id") || crypto.randomUUID();
+      const { data: found } = await supabase
+        .from("conversations")
+        .select("id")
+        .eq("user_id", visitorId)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
 
-      localStorage.setItem("meh_visitor_id", visitorId);
+      if (found?.id) {
+        localStorage.setItem("meh_conversation_id", found.id);
+        setConversationId(found.id);
+        return;
+      }
 
       const { data, error } = await supabase
         .from("conversations")
@@ -107,7 +106,7 @@ export default function ChatWidget() {
         .single();
 
       if (error) {
-        console.error("Conversation creation failed:", error);
+        console.error(error);
         return;
       }
 
@@ -118,14 +117,14 @@ export default function ChatWidget() {
     })();
   }, []);
 
-  // 2️⃣ Load messages + realtime
+  // load messages + realtime
   useEffect(() => {
     if (!conversationId) return;
 
     (async () => {
       const { data } = await supabase
         .from("messages")
-        .select("*")
+        .select("id, created_at, sender, body")
         .eq("conversation_id", conversationId)
         .order("created_at", { ascending: true });
 
@@ -133,7 +132,7 @@ export default function ChatWidget() {
     })();
 
     const channel = supabase
-      .channel(`messages:${conversationId}`)
+      .channel(`messages-${conversationId}`)
       .on(
         "postgres_changes",
         {
@@ -145,12 +144,13 @@ export default function ChatWidget() {
         (payload) => {
           const newMsg = payload.new as Msg;
 
-          setMessages((prev) => [...prev, newMsg]);
+          setMessages((prev) => {
+            const exists = prev.some((m) => m.id === newMsg.id);
+            if (exists) return prev;
+            return [...prev, newMsg];
+          });
 
-          // 🔔 POP only when admin sends to client
-          if (newMsg.sender === "admin") {
-            playPop();
-          }
+          if (newMsg.sender === "admin") playPop();
         }
       )
       .subscribe();
@@ -160,12 +160,12 @@ export default function ChatWidget() {
     };
   }, [conversationId, playPop]);
 
-  // 2b️⃣ Typing indicator (admin -> client)
+  // typing indicator
   useEffect(() => {
     if (!conversationId) return;
 
     const channel = supabase
-      .channel(`typing:${conversationId}`)
+      .channel(`typing-${conversationId}`)
       .on(
         "postgres_changes",
         {
@@ -181,41 +181,33 @@ export default function ChatWidget() {
       )
       .subscribe();
 
-    // fetch current typing state once
-    (async () => {
-      const { data } = await supabase
-        .from("typing")
-        .select("admin_typing")
-        .eq("conversation_id", conversationId)
-        .maybeSingle();
-      setAdminIsTyping(!!data?.admin_typing);
-    })();
-
     return () => {
       supabase.removeChannel(channel);
     };
   }, [conversationId]);
 
-  // 3️⃣ Auto open after 30 seconds
+  // auto open
   useEffect(() => {
-    const t = window.setTimeout(() => {
+    const t = setTimeout(() => {
       if (openedOnceRef.current) return;
       openedOnceRef.current = true;
       setOpen(true);
       playPop();
     }, 30000);
 
-    return () => window.clearTimeout(t);
+    return () => clearTimeout(t);
   }, [playPop]);
 
+  // send message
   async function sendVisitorMessage(body: string) {
     if (!conversationId || !body.trim()) return;
 
     const trimmed = body.trim();
 
-    // Optimistic UI update (instant message display)
+    const tempId = crypto.randomUUID();
+
     const tempMessage: Msg = {
-      id: crypto.randomUUID(),
+      id: tempId,
       created_at: new Date().toISOString(),
       sender: "visitor",
       body: trimmed,
@@ -223,14 +215,25 @@ export default function ChatWidget() {
 
     setMessages((prev) => [...prev, tempMessage]);
 
-    const { error } = await supabase.from("messages").insert({
-      conversation_id: conversationId,
-      sender: "visitor",
-      body: trimmed,
-    });
+    const { data, error } = await supabase
+      .from("messages")
+      .insert({
+        conversation_id: conversationId,
+        sender: "visitor",
+        body: trimmed,
+      })
+      .select("id, created_at, sender, body")
+      .single();
 
     if (error) {
-      console.error("Message insert failed:", error);
+      console.error(error);
+      return;
+    }
+
+    if (data) {
+      setMessages((prev) =>
+        prev.map((m) => (m.id === tempId ? (data as Msg) : m))
+      );
     }
   }
 
@@ -243,69 +246,36 @@ export default function ChatWidget() {
     <>
       {/* Floating Button */}
       <button
-        type="button"
-        aria-label="Open chat"
         onClick={() => {
           setOpen(true);
           playPop();
         }}
-        className="fixed bottom-6 right-6 z-[9999] h-14 w-14 rounded-full bg-slate-900 shadow-2xl flex items-center justify-center hover:scale-[1.03] active:scale-[0.98] transition-transform"
+        className="fixed bottom-6 right-6 z-[9999] h-14 w-14 rounded-full bg-slate-900 text-white shadow-2xl"
       >
-        <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
-          <path
-            d="M21 12c0 4.418-4.03 8-9 8-1.09 0-2.135-.153-3.11-.44L3 21l1.61-4.03A7.44 7.44 0 0 1 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8Z"
-            stroke="white"
-            strokeWidth="2"
-            strokeLinejoin="round"
-          />
-          <path
-            d="M7.5 12h.01M11.5 12h.01M15.5 12h.01"
-            stroke="white"
-            strokeWidth="3"
-            strokeLinecap="round"
-          />
-        </svg>
+        💬
       </button>
 
-      {/* Chat Panel */}
       {open && (
-        <div className="fixed bottom-24 right-6 z-[9999] w-[360px] overflow-hidden rounded-2xl border bg-white shadow-2xl">
+        <div className="fixed bottom-24 right-6 z-[9999] w-[360px] rounded-2xl border bg-white shadow-2xl overflow-hidden">
           {/* Header */}
-          <div className="flex items-center justify-between px-4 py-3 bg-gradient-to-r from-slate-900 to-slate-700 text-white">
-            <div className="flex items-center gap-3">
-              <div className="relative h-9 w-9 rounded-full bg-white/15 flex items-center justify-center">
-                <span className="text-sm font-semibold">ME</span>
-                <span className="absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full bg-emerald-400 ring-2 ring-slate-800" />
-              </div>
-              <div className="leading-tight">
-                <div className="text-sm font-semibold">MyExamHelp Chat</div>
-                <div className="text-xs text-white/75">Online • replies fast</div>
-              </div>
+          <div className="flex items-center justify-between px-4 py-3 bg-slate-900 text-white">
+            <div>
+              <div className="text-sm font-semibold">MyExamHelp Chat</div>
+              <div className="text-xs opacity-70">Online • replies fast</div>
             </div>
 
-            <button
-              onClick={() => setOpen(false)}
-              className="h-8 w-8 rounded-full bg-white/10 hover:bg-white/15 flex items-center justify-center"
-              type="button"
-              aria-label="Close chat"
-            >
-              ✕
-            </button>
+            <button onClick={() => setOpen(false)}>✕</button>
           </div>
 
-          {/* Body */}
-          <div className="h-[340px] bg-slate-50 overflow-y-auto px-4 py-4 space-y-3">
-            <div className="max-w-[85%] rounded-2xl bg-white border px-3 py-2 text-sm text-slate-800 shadow-sm">
+          {/* Messages */}
+          <div className="h-[340px] overflow-y-auto bg-slate-50 px-4 py-4 space-y-3">
+            <div className="bg-white border rounded-xl px-3 py-2 text-sm">
               Hi there 👋 <br />
               What exam or subject would you like help on?
-              <div className="mt-1 text-[11px] text-slate-400">
-                Just type it below.
-              </div>
             </div>
 
-            {/* ✅ Typing indicator (client sees admin typing) */}
             {adminIsTyping && (
-              <div className="max-w-[60%] rounded-2xl bg-white border px-3 py-2 text-sm text-slate-500 shadow-sm">
+              <div className="bg-white border rounded-xl px-3 py-2 text-sm text-slate-500">
                 Admin is typing…
               </div>
             )}
@@ -318,20 +288,15 @@ export default function ChatWidget() {
                 }`}
               >
                 <div
-                  className={`max-w-[85%] rounded-2xl px-3 py-2 text-sm shadow-sm ${
+                  className={`max-w-[85%] rounded-2xl px-3 py-2 text-sm ${
                     m.sender === "visitor"
-                      ? "bg-slate-900 text-white rounded-br-md"
-                      : "bg-white border text-slate-800 rounded-bl-md"
+                      ? "bg-slate-900 text-white"
+                      : "bg-white border"
                   }`}
                 >
                   {m.body}
-                  <div
-                    className={`mt-1 text-[10px] ${
-                      m.sender === "visitor"
-                        ? "text-white/60"
-                        : "text-slate-400"
-                    }`}
-                  >
+
+                  <div className="text-[10px] opacity-60 mt-1">
                     {new Date(m.created_at).toLocaleTimeString([], {
                       hour: "2-digit",
                       minute: "2-digit",
@@ -343,32 +308,24 @@ export default function ChatWidget() {
           </div>
 
           {/* Input */}
-          <div className="border-t bg-white px-3 py-3">
-            <div className="flex items-center gap-2">
+          <div className="border-t px-3 py-3 bg-white">
+            <div className="flex gap-2">
               <input
                 value={text}
                 onChange={(e) => setText(e.target.value)}
                 placeholder="Enter your message..."
-                className="flex-1 rounded-full border px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-slate-900/20"
+                className="flex-1 border rounded-full px-4 py-2 text-sm"
                 onKeyDown={(e) => {
                   if (e.key === "Enter") submitChat();
                 }}
               />
+
               <button
                 onClick={submitChat}
-                className="rounded-full bg-slate-900 text-white px-4 py-2 text-sm hover:bg-slate-800"
-                type="button"
+                className="bg-slate-900 text-white px-4 py-2 rounded-full text-sm"
               >
                 Send
               </button>
-            </div>
-
-            <div className="mt-2 flex items-center justify-between text-[11px] text-slate-400">
-              <span>Press Enter to send</span>
-              <span className="flex items-center gap-1">
-                <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-                Secure chat
-              </span>
             </div>
           </div>
         </div>
